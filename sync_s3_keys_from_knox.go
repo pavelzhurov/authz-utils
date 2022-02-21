@@ -10,12 +10,13 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io/ioutil"
-	"math/rand"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -32,7 +33,138 @@ type S3Keys struct {
 	SecretKey string
 }
 
-func loadCertificates(paths []string) ([]tls.Certificate, error) {
+type KnoxClient struct {
+	knox.APIClient
+}
+
+type ClientOption func(*http.Client)
+
+func NewKnoxClient(hostname string, tlsSkipVerify bool, timeout time.Duration, tlsConfig *tls.Config) *KnoxClient {
+
+	c := newHttpClient(timeout, tlsSkipVerify, tlsConfig)
+
+	namespace, sa := getAuthPathAttributes()
+
+	authHandler := func() string {
+		if sa != "" && namespace != "" {
+			return "0sspiffe://example.org/ns/" + namespace + "/sa/" + sa
+		}
+		return ""
+	}
+
+	if hostname == "" {
+		hostname = "knox.knox:9000"
+	}
+
+	k := knox.NewClient(hostname, c, authHandler, keyFolder, "")
+
+	return &KnoxClient{
+		k,
+	}
+}
+
+func NewKnoxClientFromEnv() (*KnoxClient, error) {
+	_, ok := os.LookupEnv("SPIFFE_CLIENT")
+	if !ok {
+		return nil, errors.New("SPIFFE certs are not provided")
+	}
+
+	// hostname is the host running the knox server
+	hostname, ok := os.LookupEnv("KNOX_SERVER")
+	if !ok {
+		hostname = "knox.knox:9000"
+	}
+
+	caCert, ok := os.LookupEnv("KNOX_SERVER_CA")
+	if !ok {
+		return nil, errors.New("knox CA cert is not provided")
+	}
+
+	var (
+		tlsSkipVerify bool
+		timeout       time.Duration
+		err           error
+	)
+
+	tlsSkipVerifyStr, ok := os.LookupEnv("KNOX_TLS_SKIP_VERIFY")
+	if ok {
+		tlsSkipVerify, err = strconv.ParseBool(tlsSkipVerifyStr)
+		if err != nil {
+			return nil, fmt.Errorf(ErrMissedConfigValue, "parse KNOX_INSECURE error")
+		}
+	}
+
+	timeoutStr, ok := os.LookupEnv("KNOX_TIMEOUT")
+	if ok {
+		t, err := strconv.Atoi(timeoutStr)
+		if err != nil {
+			return nil, fmt.Errorf(ErrMissedConfigValue, "parse KNOX_TIMEOUT error")
+		}
+
+		timeout = time.Duration(t) * time.Millisecond
+	}
+
+	tlsConfig, err := knoxTlsConfig(hostname, caCert)
+	if err != nil {
+		return nil, fmt.Errorf("failed to init knox client: %w", err)
+	}
+
+	return NewKnoxClient(hostname, tlsSkipVerify, timeout, tlsConfig), nil
+}
+
+func knoxTlsConfig(hostname, caCert string) (*tls.Config, error) {
+	tlsConfig := &tls.Config{
+		ServerName: hostname,
+	}
+	caCertString, ok := os.LookupEnv("KNOX_SERVER_CA")
+	if !ok {
+		return nil, fmt.Errorf("knox CA cert is not provided")
+	}
+	caCertPool := x509.NewCertPool()
+	caCertPool.AppendCertsFromPEM([]byte(caCertString))
+	certs, err := loadCertificates("/certs/*.key", "/certs/*.pem")
+	if err != nil {
+		return nil, fmt.Errorf("failed to load spiffe certs: %w", err)
+	}
+
+	tlsConfig.Certificates = certs
+	tlsConfig.RootCAs = caCertPool
+
+	return tlsConfig, nil
+}
+
+func (k *KnoxClient) SyncKeysFromKnox() ([]S3Keys, error) {
+	keys, err := k.GetKeys(map[string]string{})
+	if err != nil {
+		return nil, fmt.Errorf("can't get keys list. error: %v", err)
+	}
+
+	s3keys := make([]S3Keys, len(keys))
+	for i, key := range keys {
+		var s3key S3Keys
+
+		if s3keyRaw, err := k.GetKey(key); err == nil && s3keyRaw != nil {
+			s3keyRawData := s3keyRaw.VersionList.GetPrimary().Data
+
+			err = json.Unmarshal(s3keyRawData, &s3key)
+			if err != nil {
+				return nil, fmt.Errorf("can't parse s3key data %+v", s3keyRawData)
+			}
+
+			s3keys[i] = S3Keys{
+				AccessKey: s3key.AccessKey,
+				SecretKey: s3key.SecretKey,
+			}
+		} else {
+			return nil, fmt.Errorf("failed to get key from knox: %w", err)
+		}
+
+	}
+
+	return s3keys, nil
+}
+
+func loadCertificates(paths ...string) ([]tls.Certificate, error) {
 	certs := []tls.Certificate{}
 	keys := []tls.Certificate{}
 
@@ -164,22 +296,27 @@ func addBlocks(path string) (tls.Certificate, error) {
 		if block == nil {
 			break
 		}
+		raw = rest
+
 		if block.Type == "CERTIFICATE" {
 			cert.Certificate = append(cert.Certificate, block.Bytes)
-		} else if !(block.Type == "PRIVATE KEY" || strings.HasSuffix(block.Type, " PRIVATE KEY")) {
-		} else if key, err := parsePrivateKey(block.Bytes); err != nil {
-			return cert, fmt.Errorf("failure reading private key from \"%s\": %s", path, err)
-		} else {
-			cert.PrivateKey = key
+			continue
 		}
 
-		raw = rest
+		if strings.HasSuffix(block.Type, "PRIVATE KEY") {
+			key, err := parsePrivateKey(block.Bytes)
+			if err != nil {
+				return cert, fmt.Errorf("failure reading private key from \"%s\": %s", path, err)
+			}
+			cert.PrivateKey = key
+			continue
+		}
 	}
 
 	return cert, nil
 }
 
-func authHandler() string {
+func getAuthPathAttributes() (string, string) {
 	_, ok := os.LookupEnv("SPIFFE_CLIENT")
 	if ok {
 		namespace, ok := os.LookupEnv("NAMESPACE")
@@ -191,73 +328,7 @@ func authHandler() string {
 			glog.Error("POD_SA is not defined")
 		}
 
-		return "0sspiffe://example.org/ns/" + namespace + "/sa/" + serviceaccount
+		return namespace, serviceaccount
 	}
-	return ""
-}
-
-func SyncKeysFromKnox() ([]S3Keys, error) {
-	// hostname is the host running the knox server
-	hostname, ok := os.LookupEnv("KNOX_SERVER")
-	if !ok {
-		hostname = "knox.knox:9000"
-	}
-
-	rand.Seed(time.Now().UTC().UnixNano())
-
-	tlsConfig := &tls.Config{
-		ServerName: hostname,
-	}
-	_, ok = os.LookupEnv("SPIFFE_CLIENT")
-	if ok {
-		caCertString, ok := os.LookupEnv("KNOX_SERVER_CA")
-		if !ok {
-			return nil, fmt.Errorf("knox CA cert is not provided")
-		}
-		caCertPool := x509.NewCertPool()
-		caCertPool.AppendCertsFromPEM([]byte(caCertString))
-		certs, err := loadCertificates([]string{"/certs/*.key", "/certs/*.pem"})
-		if err == nil {
-			tlsConfig.Certificates = certs
-			tlsConfig.RootCAs = caCertPool
-		}
-	} else {
-		return nil, fmt.Errorf("SPIFFE certs are not provided")
-	}
-
-	cli := &knox.HTTPClient{
-		Host:        hostname,
-		AuthHandler: authHandler,
-		KeyFolder:   keyFolder,
-		Client:      &http.Client{Transport: &http.Transport{TLSClientConfig: tlsConfig}},
-	}
-
-	keys_list, err := cli.GetKeys(map[string]string{})
-	if err != nil {
-		return nil, fmt.Errorf("can't get keys list. error: %v", err)
-	}
-	s3keys := []S3Keys{}
-	for _, key := range keys_list {
-		type S3Key struct {
-			AccessKey string
-			SecretKey string
-		}
-		var s3key S3Key
-		s3keyRaw, err := cli.GetKey(key)
-		if err != nil {
-			return nil, fmt.Errorf("can't parse s3key %v. data: %+v", key, s3keyRaw)
-		}
-		s3keyRawData := s3keyRaw.VersionList.GetPrimary().Data
-		err = json.Unmarshal(s3keyRawData, &s3key)
-		if err != nil {
-			return nil, fmt.Errorf("can't parse s3key data %+v", s3keyRawData)
-		}
-		api_access_key := s3key.AccessKey
-		api_secret_key := s3key.SecretKey
-		s3keys = append(s3keys, S3Keys{
-			AccessKey: api_access_key,
-			SecretKey: api_secret_key,
-		})
-	}
-	return s3keys, nil
+	return "", ""
 }
