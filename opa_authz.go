@@ -25,7 +25,7 @@ const (
 	AuthzOPADefaultRetries = 5
 )
 
-type Authenticator struct {
+type Authorizer struct {
 	region     string
 	accountID  string
 	projectID  string
@@ -35,9 +35,9 @@ type Authenticator struct {
 	client *retryablehttp.Client
 }
 
-func NewAuthenticator(region, accountID, projectID, resourceID, opaURL string, clientTimeout time.Duration, retries int, tlsSkipVerify bool) *Authenticator {
+func NewAuthorizer(region, accountID, projectID, resourceID, opaURL string, clientTimeout time.Duration, retries int, tlsSkipVerify bool) *Authorizer {
 	retryableClient, _ := newHttpClient(clientTimeout, AuthzOPADefaultRetries, tlsSkipVerify, nil)
-	return &Authenticator{
+	return &Authorizer{
 		region:     region,
 		accountID:  accountID,
 		projectID:  projectID,
@@ -47,7 +47,7 @@ func NewAuthenticator(region, accountID, projectID, resourceID, opaURL string, c
 	}
 }
 
-func NewAuthenticatorFromEnv() (*Authenticator, error) {
+func NewAuthenticatorFromEnv() (*Authorizer, error) {
 	region, ok := os.LookupEnv("AUTHZ_REGION")
 	if !ok {
 		return nil, fmt.Errorf(ErrMissedConfigValue, "AUTHZ_REGION in not provided")
@@ -114,7 +114,7 @@ func NewAuthenticatorFromEnv() (*Authenticator, error) {
 		return nil, fmt.Errorf(ErrMissedConfigValue, err)
 	}
 
-	return &Authenticator{
+	return &Authorizer{
 		region:     region,
 		accountID:  accountID,
 		projectID:  projectID,
@@ -124,7 +124,7 @@ func NewAuthenticatorFromEnv() (*Authenticator, error) {
 	}, nil
 }
 
-func (a *Authenticator) Authz(partition, service, username, action, path string, tags map[string]string) (bool, error) {
+func (a *Authorizer) Authz(partition, service, username, action, path string, tags map[string]string) (bool, error) {
 	glog.V(3).Infof("Action: %v, path: %v, tags: %+v", action, path, tags)
 
 	input, _ := json.Marshal(map[string]interface{}{
@@ -171,12 +171,12 @@ func newHttpClient(clientTimeout time.Duration, retries int, tlsSkipVerify bool,
 	if retries < 0 {
 		return nil, fmt.Errorf("Negative retries number: %d", retries)
 	}
-	
+
 	c := retryablehttp.NewClient()
 	c.RetryMax = retries
 	if clientTimeout != 0 {
 		c.HTTPClient.Timeout = clientTimeout
-	} 
+	}
 
 	if tlsConfig != nil {
 		c.HTTPClient.Transport = &http.Transport{
