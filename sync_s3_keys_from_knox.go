@@ -41,7 +41,8 @@ type ClientOption func(*http.Client)
 
 func NewKnoxClient(hostname string, tlsSkipVerify bool, timeout time.Duration, tlsConfig *tls.Config) *KnoxClient {
 
-	c := newHttpClient(timeout, tlsSkipVerify, tlsConfig)
+	// Knox client doesn't support retryable client, so retry number doesn't matter
+	c, _ := newHttpClient(timeout, 0, tlsSkipVerify, tlsConfig)
 
 	namespace, sa := getAuthPathAttributes()
 
@@ -56,7 +57,7 @@ func NewKnoxClient(hostname string, tlsSkipVerify bool, timeout time.Duration, t
 		hostname = "knox.knox:9000"
 	}
 
-	k := knox.NewClient(hostname, c, authHandler, keyFolder, "")
+	k := knox.NewClient(hostname, c.HTTPClient, authHandler, keyFolder, "")
 
 	return &KnoxClient{
 		k,

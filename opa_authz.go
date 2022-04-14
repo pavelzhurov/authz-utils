@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/golang/glog"
+	"github.com/hashicorp/go-retryablehttp"
 )
 
 const (
@@ -20,6 +21,8 @@ const (
 	HeaderContentType = "Content-Type"
 
 	ContentTypeApplicationJSON = "application/json"
+
+	AuthzOPADefaultRetries = 5
 )
 
 type Authenticator struct {
@@ -29,17 +32,18 @@ type Authenticator struct {
 	resourceID string
 	opaURL     string
 
-	client *http.Client
+	client *retryablehttp.Client
 }
 
-func NewAuthenticator(region, accountID, projectID, resourceID, opaURL string, clientTimeout time.Duration, tlsSkipVerify bool) *Authenticator {
+func NewAuthenticator(region, accountID, projectID, resourceID, opaURL string, clientTimeout time.Duration, retries int, tlsSkipVerify bool) *Authenticator {
+	retryableClient, _ := newHttpClient(clientTimeout, AuthzOPADefaultRetries, tlsSkipVerify, nil)
 	return &Authenticator{
 		region:     region,
 		accountID:  accountID,
 		projectID:  projectID,
 		resourceID: resourceID,
 		opaURL:     opaURL,
-		client:     newHttpClient(clientTimeout, tlsSkipVerify, nil),
+		client:     retryableClient,
 	}
 }
 
@@ -94,13 +98,29 @@ func NewAuthenticatorFromEnv() (*Authenticator, error) {
 		}
 	}
 
+	var retries int
+	retriesStr, ok := os.LookupEnv("AUTHZ_OPA_RETRIES")
+	if ok {
+		retries, err = strconv.Atoi(retriesStr)
+		if err != nil {
+			return nil, fmt.Errorf(ErrMissedConfigValue, "parse KNOX_INSECURE error")
+		}
+	} else {
+		retries = AuthzOPADefaultRetries
+	}
+
+	retryableClient, err := newHttpClient(time.Duration(timeout)*time.Millisecond, retries, insecure, nil)
+	if err != nil {
+		return nil, fmt.Errorf(ErrMissedConfigValue, err)
+	}
+
 	return &Authenticator{
 		region:     region,
 		accountID:  accountID,
 		projectID:  projectID,
 		resourceID: resourceID,
 		opaURL:     opaURL,
-		client:     newHttpClient(time.Duration(timeout)*time.Millisecond, insecure, nil),
+		client:     retryableClient,
 	}, nil
 }
 
@@ -127,7 +147,8 @@ func (a *Authenticator) Authz(partition, service, username, action, path string,
 
 	req.Header.Add(HeaderContentType, ContentTypeApplicationJSON)
 
-	res, err := a.client.Do(req)
+	retriableRequest, _ := retryablehttp.FromRequest(req)
+	res, err := a.client.Do(retriableRequest)
 	if err != nil {
 		return false, fmt.Errorf("auth request failed: %w", err)
 	}
@@ -146,29 +167,29 @@ func (a *Authenticator) Authz(partition, service, username, action, path string,
 	return resp, nil
 }
 
-func newHttpClient(clientTimeout time.Duration, tlsSkipVerify bool, tlsConfig *tls.Config) *http.Client {
-	var c *http.Client
-	if clientTimeout != 0 {
-		c = &http.Client{
-			Timeout: clientTimeout,
-		}
-	} else {
-		c = http.DefaultClient
+func newHttpClient(clientTimeout time.Duration, retries int, tlsSkipVerify bool, tlsConfig *tls.Config) (*retryablehttp.Client, error) {
+	if retries < 0 {
+		return nil, fmt.Errorf("Negative retries number: %d", retries)
 	}
+	
+	c := retryablehttp.NewClient()
+	c.RetryMax = retries
+	if clientTimeout != 0 {
+		c.HTTPClient.Timeout = clientTimeout
+	} 
 
 	if tlsConfig != nil {
-		tlsConfig.InsecureSkipVerify = tlsSkipVerify
-		c.Transport = &http.Transport{
+		c.HTTPClient.Transport = &http.Transport{
 			TLSClientConfig: tlsConfig,
 		}
 
-		return c
+		return c, nil
 	}
-	c.Transport = &http.Transport{
+	c.HTTPClient.Transport = &http.Transport{
 		TLSClientConfig: &tls.Config{
 			InsecureSkipVerify: tlsSkipVerify,
 		},
 	}
 
-	return c
+	return c, nil
 }
