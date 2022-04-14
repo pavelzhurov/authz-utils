@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	ErrMissedConfigValue = "failed to init authenticator from env: %s"
+	ErrMissedConfigValue = "failed to init authorizer from env: %s"
 
 	HeaderContentType = "Content-Type"
 
@@ -47,7 +47,7 @@ func NewAuthorizer(region, accountID, projectID, resourceID, opaURL string, clie
 	}
 }
 
-func NewAuthenticatorFromEnv() (*Authorizer, error) {
+func NewAuthorizerFromEnv() (*Authorizer, error) {
 	region, ok := os.LookupEnv("AUTHZ_REGION")
 	if !ok {
 		return nil, fmt.Errorf(ErrMissedConfigValue, "AUTHZ_REGION in not provided")
