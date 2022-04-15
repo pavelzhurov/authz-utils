@@ -29,6 +29,7 @@ import (
 const keyFolder = "/var/lib/knox/v0/keys/"
 
 type S3Keys struct {
+	Name      string
 	AccessKey string
 	SecretKey string
 }
@@ -153,6 +154,7 @@ func (k *KnoxClient) SyncKeysFromKnox() ([]S3Keys, error) {
 			}
 
 			s3keys[i] = S3Keys{
+				Name:      key,
 				AccessKey: s3key.AccessKey,
 				SecretKey: s3key.SecretKey,
 			}
