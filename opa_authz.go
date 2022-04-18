@@ -174,6 +174,7 @@ func newHttpClient(clientTimeout time.Duration, retries int, tlsSkipVerify bool,
 
 	c := retryablehttp.NewClient()
 	c.RetryMax = retries
+	c.Logger = nil
 	if clientTimeout != 0 {
 		c.HTTPClient.Timeout = clientTimeout
 	}
