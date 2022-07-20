@@ -124,7 +124,7 @@ func knoxTlsConfig(hostname, caCert string) (*tls.Config, error) {
 	}
 	caCertPool := x509.NewCertPool()
 	caCertPool.AppendCertsFromPEM([]byte(caCertString))
-	certs, err := loadCertificates("/certs/*.key", "/certs/*.pem")
+	certs, err := LoadCertificates("/certs/*.key", "/certs/*.pem")
 	if err != nil {
 		return nil, fmt.Errorf("failed to load spiffe certs: %w", err)
 	}
@@ -167,7 +167,7 @@ func (k *KnoxClient) SyncKeysFromKnox() ([]S3Keys, error) {
 	return s3keys, nil
 }
 
-func loadCertificates(paths ...string) ([]tls.Certificate, error) {
+func LoadCertificates(paths ...string) ([]tls.Certificate, error) {
 	certs := []tls.Certificate{}
 	keys := []tls.Certificate{}
 
