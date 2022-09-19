@@ -21,7 +21,6 @@ import (
 	"time"
 
 	"github.com/gobwas/glob"
-	"github.com/golang/glog"
 	"github.com/pinterest/knox"
 )
 
@@ -45,13 +44,8 @@ func NewKnoxClient(hostname string, tlsSkipVerify bool, timeout time.Duration, t
 	// Knox client doesn't support retryable client, so retry number doesn't matter
 	c, _ := newHttpClient(timeout, 0, tlsSkipVerify, tlsConfig)
 
-	namespace, sa := getAuthPathAttributes()
-
 	authHandler := func() string {
-		if sa != "" && namespace != "" {
-			return "0sspiffe://example.org/ns/" + namespace + "/sa/" + sa
-		}
-		return ""
+		return "0s"
 	}
 
 	if hostname == "" {
@@ -135,7 +129,27 @@ func knoxTlsConfig(hostname, caCert string) (*tls.Config, error) {
 	return tlsConfig, nil
 }
 
+func (k *KnoxClient) reloadClientCertificatesIfExpired() error {
+	expired := true
+	for _, cert := range k.APIClient.(*knox.HTTPClient).Client.(*http.Client).Transport.(*http.Transport).TLSClientConfig.Certificates {
+		parsedCert, err := x509.ParseCertificate(cert.Certificate[0])
+		if err != nil {
+			return fmt.Errorf("failed to load spiffe certs: %w", err)
+		}
+		expired = expired || time.Now().After(parsedCert.NotAfter)
+	}
+	if expired {
+		certs, err := LoadCertificates("/certs/*.key", "/certs/*.pem")
+		if err != nil {
+			return fmt.Errorf("failed to load spiffe certs: %w", err)
+		}
+		k.APIClient.(*knox.HTTPClient).Client.(*http.Client).Transport.(*http.Transport).TLSClientConfig.Certificates = certs
+	}
+	return nil
+}
+
 func (k *KnoxClient) SyncKeysFromKnox() ([]S3Keys, error) {
+	k.reloadClientCertificatesIfExpired()
 	keys, err := k.GetKeys(map[string]string{})
 	if err != nil {
 		return nil, fmt.Errorf("can't get keys list. error: %v", err)
@@ -317,21 +331,4 @@ func addBlocks(path string) (tls.Certificate, error) {
 	}
 
 	return cert, nil
-}
-
-func getAuthPathAttributes() (string, string) {
-	_, ok := os.LookupEnv("SPIFFE_CLIENT")
-	if ok {
-		namespace, ok := os.LookupEnv("NAMESPACE")
-		if !ok {
-			glog.Error("NAMESPACE is not defined")
-		}
-		serviceaccount, ok := os.LookupEnv("POD_SA")
-		if !ok {
-			glog.Error("POD_SA is not defined")
-		}
-
-		return namespace, serviceaccount
-	}
-	return "", ""
 }
