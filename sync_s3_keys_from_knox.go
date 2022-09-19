@@ -39,20 +39,32 @@ type KnoxClient struct {
 
 type ClientOption func(*http.Client)
 
-func NewKnoxClient(hostname string, tlsSkipVerify bool, timeout time.Duration, tlsConfig *tls.Config) *KnoxClient {
+type CertReloadableClient struct {
+	HTTPClient *http.Client
+	tlsConfig  *tls.Config
+}
 
+func (cl *CertReloadableClient) authHandler() string {
+	certs, _ := LoadCertificates("/certs/*.key", "/certs/*.pem")
+	cl.tlsConfig.Certificates = certs
+	return "0s"
+}
+
+func NewKnoxClient(hostname string, tlsSkipVerify bool, timeout time.Duration, tlsConfig *tls.Config) *KnoxClient {
 	// Knox client doesn't support retryable client, so retry number doesn't matter
+	client := &CertReloadableClient{
+		tlsConfig: tlsConfig,
+	}
 	c, _ := newHttpClient(timeout, 0, tlsSkipVerify, tlsConfig)
 
-	authHandler := func() string {
-		return "0s"
-	}
+	client.HTTPClient = c.HTTPClient
+	client.HTTPClient.Transport.(*http.Transport).DisableKeepAlives = true
 
 	if hostname == "" {
 		hostname = "knox.knox:9000"
 	}
 
-	k := knox.NewClient(hostname, c.HTTPClient, authHandler, keyFolder, "")
+	k := knox.NewClient(hostname, client.HTTPClient, client.authHandler, keyFolder, "")
 
 	return &KnoxClient{
 		k,
@@ -118,38 +130,11 @@ func knoxTlsConfig(hostname, caCert string) (*tls.Config, error) {
 	}
 	caCertPool := x509.NewCertPool()
 	caCertPool.AppendCertsFromPEM([]byte(caCertString))
-	certs, err := LoadCertificates("/certs/*.key", "/certs/*.pem")
-	if err != nil {
-		return nil, fmt.Errorf("failed to load spiffe certs: %w", err)
-	}
-
-	tlsConfig.Certificates = certs
 	tlsConfig.RootCAs = caCertPool
-
 	return tlsConfig, nil
 }
 
-func (k *KnoxClient) reloadClientCertificatesIfExpired() error {
-	expired := true
-	for _, cert := range k.APIClient.(*knox.HTTPClient).Client.(*http.Client).Transport.(*http.Transport).TLSClientConfig.Certificates {
-		parsedCert, err := x509.ParseCertificate(cert.Certificate[0])
-		if err != nil {
-			return fmt.Errorf("failed to load spiffe certs: %w", err)
-		}
-		expired = expired || time.Now().After(parsedCert.NotAfter)
-	}
-	if expired {
-		certs, err := LoadCertificates("/certs/*.key", "/certs/*.pem")
-		if err != nil {
-			return fmt.Errorf("failed to load spiffe certs: %w", err)
-		}
-		k.APIClient.(*knox.HTTPClient).Client.(*http.Client).Transport.(*http.Transport).TLSClientConfig.Certificates = certs
-	}
-	return nil
-}
-
 func (k *KnoxClient) SyncKeysFromKnox() ([]S3Keys, error) {
-	k.reloadClientCertificatesIfExpired()
 	keys, err := k.GetKeys(map[string]string{})
 	if err != nil {
 		return nil, fmt.Errorf("can't get keys list. error: %v", err)
