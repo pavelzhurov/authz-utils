@@ -5,7 +5,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"os"
 	"strconv"
@@ -153,7 +153,7 @@ func (a *Authorizer) Authz(partition, service, username, action, path string, ta
 		return false, fmt.Errorf("auth request failed: %w", err)
 	}
 
-	responseBody, err := ioutil.ReadAll(res.Body)
+	responseBody, err := io.ReadAll(res.Body)
 	if err != nil {
 		return false, fmt.Errorf("failed to read response body: %w", err)
 	}
@@ -169,7 +169,7 @@ func (a *Authorizer) Authz(partition, service, username, action, path string, ta
 
 func newHttpClient(clientTimeout time.Duration, retries int, tlsSkipVerify bool, tlsConfig *tls.Config) (*retryablehttp.Client, error) {
 	if retries < 0 {
-		return nil, fmt.Errorf("Negative retries number: %d", retries)
+		return nil, fmt.Errorf("negative retries number: %d", retries)
 	}
 
 	c := retryablehttp.NewClient()

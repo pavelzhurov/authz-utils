@@ -12,7 +12,6 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
-	"io/ioutil"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -140,27 +139,27 @@ func (k *KnoxClient) SyncKeysFromKnox() ([]S3Keys, error) {
 		return nil, fmt.Errorf("can't get keys list. error: %v", err)
 	}
 
-	s3keys := make([]S3Keys, len(keys))
-	for i, key := range keys {
-		var s3key S3Keys
+	s3keys := []S3Keys{}
+	for _, key := range keys {
+		if strings.HasPrefix(key, "-sup-") {
+			var s3key S3Keys
 
-		if s3keyRaw, err := k.GetKey(key); err == nil && s3keyRaw != nil {
-			s3keyRawData := s3keyRaw.VersionList.GetPrimary().Data
+			if s3keyRaw, err := k.GetKey(key); err == nil && s3keyRaw != nil {
+				s3keyRawData := s3keyRaw.VersionList.GetPrimary().Data
 
-			err = json.Unmarshal(s3keyRawData, &s3key)
-			if err != nil {
-				return nil, fmt.Errorf("can't parse s3key data %+v", s3keyRawData)
+				err = json.Unmarshal(s3keyRawData, &s3key)
+				if err != nil {
+					return nil, fmt.Errorf("can't parse s3key data %+v", s3keyRawData)
+				}
+				s3keys = append(s3keys, S3Keys{
+					Name:      strings.Replace(key, "-sup-", "", 1),
+					AccessKey: s3key.AccessKey,
+					SecretKey: s3key.SecretKey,
+				})
+			} else {
+				return nil, fmt.Errorf("failed to get key from knox: %w", err)
 			}
-
-			s3keys[i] = S3Keys{
-				Name:      key,
-				AccessKey: s3key.AccessKey,
-				SecretKey: s3key.SecretKey,
-			}
-		} else {
-			return nil, fmt.Errorf("failed to get key from knox: %w", err)
 		}
-
 	}
 
 	return s3keys, nil
@@ -288,7 +287,7 @@ func parsePrivateKey(der []byte) (crypto.PrivateKey, error) {
 func addBlocks(path string) (tls.Certificate, error) {
 	cert := tls.Certificate{}
 
-	raw, err := ioutil.ReadFile(path)
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		return cert, err
 	}
